@@ -1,5 +1,6 @@
 ;; Retail Analytics Platform Smart Contract
 ;; A comprehensive platform for tracking retail sales, products, and customer analytics
+;; Addresses compiler warnings about potentially unchecked data
 
 ;; Define constants
 (define-constant contract-owner tx-sender)
@@ -15,6 +16,8 @@
 (define-constant ERR-PRODUCT-INACTIVE (err u109))
 (define-constant ERR-INVALID-FEE (err u110))
 (define-constant ERR-INVALID-DATE-RANGE (err u111))
+(define-constant ERR-INVALID-STOCK (err u112))
+(define-constant ERR-INVALID-CATEGORY (err u113))
 
 ;; Define data variables
 (define-data-var platform-fee uint u25) ;; 0.25% fee
@@ -94,6 +97,19 @@
 (define-data-var next-product-id uint u1)
 (define-data-var next-sale-id uint u1)
 
+;; Input validation helper functions
+(define-private (validate-stock (stock uint))
+    (and (>= stock u0) (<= stock u1000000)) ;; Max stock limit for sanity
+)
+
+(define-private (validate-category (category (string-ascii 30)))
+    (and (> (len category) u0) (<= (len category) u30))
+)
+
+(define-private (validate-product-id (product-id uint))
+    (and (> product-id u0) (< product-id (var-get next-product-id)))
+)
+
 ;; Read-only functions
 
 ;; Get platform statistics
@@ -165,8 +181,10 @@
         (asserts! (var-get platform-active) ERR-PLATFORM-INACTIVE)
         (asserts! (> price u0) ERR-INVALID-PRICE)
         (asserts! (> (len name) u0) ERR-INVALID-NAME)
+        (asserts! (validate-stock stock) ERR-INVALID-STOCK)
+        (asserts! (validate-category category) ERR-INVALID-CATEGORY)
         
-        ;; Add product
+        ;; Add product with validated inputs
         (map-set products
             { product-id: product-id }
             {
@@ -185,7 +203,7 @@
         ;; Update seller stats
         (update-seller-stats seller u1 u0 u0)
         
-        ;; Update category stats
+        ;; Update category stats with validated category
         (update-category-stats category u1 u0 u0 price)
         
         ;; Increment product counter
@@ -200,6 +218,7 @@
           (sale-id (var-get next-sale-id)))
         (asserts! (var-get platform-active) ERR-PLATFORM-INACTIVE)
         (asserts! (> quantity u0) ERR-INVALID-AMOUNT)
+        (asserts! (validate-product-id product-id) ERR-NOT-FOUND)
         
         (match (map-get? products { product-id: product-id })
             product-data
@@ -256,36 +275,43 @@
 
 ;; Update product details (seller only)
 (define-public (update-product (product-id uint) (price uint) (stock uint))
-    (match (map-get? products { product-id: product-id })
-        product-data
-        (begin
-            (asserts! (is-eq tx-sender (get seller product-data)) ERR-UNAUTHORIZED-ACCESS)
-            (asserts! (> price u0) ERR-INVALID-PRICE)
-            
-            (map-set products
-                { product-id: product-id }
-                (merge product-data {
-                    price: price,
-                    stock: (+ (get stock product-data) stock)
-                })
-            )
-            (ok true))
-        ERR-NOT-FOUND)
+    (begin
+        (asserts! (validate-product-id product-id) ERR-NOT-FOUND)
+        (asserts! (> price u0) ERR-INVALID-PRICE)
+        (asserts! (validate-stock stock) ERR-INVALID-STOCK)
+        
+        (match (map-get? products { product-id: product-id })
+            product-data
+            (begin
+                (asserts! (is-eq tx-sender (get seller product-data)) ERR-UNAUTHORIZED-ACCESS)
+                
+                (map-set products
+                    { product-id: product-id }
+                    (merge product-data {
+                        price: price,
+                        stock: (+ (get stock product-data) stock)
+                    })
+                )
+                (ok true))
+            ERR-NOT-FOUND))
 )
 
 ;; Deactivate product (seller only)
 (define-public (deactivate-product (product-id uint))
-    (match (map-get? products { product-id: product-id })
-        product-data
-        (begin
-            (asserts! (is-eq tx-sender (get seller product-data)) ERR-UNAUTHORIZED-ACCESS)
-            
-            (map-set products
-                { product-id: product-id }
-                (merge product-data { active: false })
-            )
-            (ok true))
-        ERR-NOT-FOUND)
+    (begin
+        (asserts! (validate-product-id product-id) ERR-NOT-FOUND)
+        
+        (match (map-get? products { product-id: product-id })
+            product-data
+            (begin
+                (asserts! (is-eq tx-sender (get seller product-data)) ERR-UNAUTHORIZED-ACCESS)
+                
+                (map-set products
+                    { product-id: product-id }
+                    (merge product-data { active: false })
+                )
+                (ok true))
+            ERR-NOT-FOUND))
 )
 
 ;; Admin functions
@@ -311,6 +337,8 @@
 (define-public (authorize-analyst (analyst principal))
     (begin
         (asserts! (is-eq tx-sender contract-owner) ERR-OWNER-ONLY)
+        ;; Additional check to prevent self-authorization loops
+        (asserts! (not (is-eq analyst contract-owner)) ERR-UNAUTHORIZED-ACCESS)
         (map-set authorized-analysts { analyst: analyst } { authorized: true })
         (ok true))
 )
@@ -319,6 +347,7 @@
 (define-public (revoke-analyst (analyst principal))
     (begin
         (asserts! (is-eq tx-sender contract-owner) ERR-OWNER-ONLY)
+        (asserts! (not (is-eq analyst contract-owner)) ERR-UNAUTHORIZED-ACCESS)
         (map-set authorized-analysts { analyst: analyst } { authorized: false })
         (ok true))
 )
